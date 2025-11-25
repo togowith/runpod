@@ -33,8 +33,13 @@ src/
 
 ## API Contract
 
-### Input Format
+The endpoint supports **two modes**: Batch mode (legacy) and Streaming mode (continuous generation).
 
+### Batch Mode (Legacy)
+
+Single request/response for a specific set of nonces.
+
+**Input Format:**
 ```json
 {
   "input": {
@@ -60,8 +65,7 @@ src/
 }
 ```
 
-### Output Format
-
+**Output Format:**
 ```json
 {
   "public_key": "string",
@@ -73,6 +77,47 @@ src/
   "total_computed": 10,
   "total_valid": 3
 }
+```
+
+### Streaming Mode (Continuous Generation)
+
+Generates nonces continuously in batches until max_batches is reached or connection closes.
+
+**Input Format:**
+```json
+{
+  "input": {
+    "block_hash": "string (hex)",
+    "block_height": 123,
+    "public_key": "string",
+    "r_target": 2.0,
+    "streaming": true,
+    "batch_size": 16,  // optional, default 16
+    "max_batches": 100,  // optional, null = unlimited
+    "start_nonce": 0,  // optional, default 0
+    "params": {...},  // optional
+    "devices": ["cuda:0"]  // optional
+  }
+}
+```
+
+**Output Format (stream of batches):**
+```json
+{
+  "public_key": "string",
+  "block_hash": "string",
+  "block_height": 123,
+  "nonces": [5, 8, 12],  // valid nonces from this batch
+  "dist": [1.2, 1.5, 1.8],
+  "node_id": 0,
+  "batch_number": 1,
+  "batch_computed": 16,  // nonces processed in this batch
+  "batch_valid": 3,  // nonces that passed filter in this batch
+  "total_computed": 16,  // cumulative total
+  "total_valid": 3,  // cumulative total
+  "next_nonce": 16  // next nonce that will be processed
+}
+// ... more batches streamed as they're computed
 ```
 
 ### Error Format

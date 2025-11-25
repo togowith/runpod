@@ -64,34 +64,49 @@ def initialize_compute(
     return COMPUTE
 
 
-def handler(event: Dict[str, Any]) -> Dict[str, Any]:
+def handler(event: Dict[str, Any]):
     """
-    Runpod handler function
+    Runpod handler function - supports both batch and streaming modes
 
-    Expected input format:
+    Batch mode (legacy) - provide "nonces" array:
     {
         "block_hash": "string",
         "block_height": int,
         "public_key": "string",
         "nonces": [int, int, ...],
         "r_target": float,
-        "params": {  # optional
-            "dim": int,
-            "n_layers": int,
-            ...
-        },
+        "params": {...},  # optional
         "devices": ["cuda:0", ...]  # optional
     }
 
-    Returns:
+    Streaming mode - provide "streaming" flag:
+    {
+        "block_hash": "string",
+        "block_height": int,
+        "public_key": "string",
+        "r_target": float,
+        "streaming": true,
+        "batch_size": 16,  # optional, default 16
+        "max_batches": 100,  # optional, default unlimited
+        "start_nonce": 0,  # optional, default 0
+        "params": {...},
+        "devices": ["cuda:0", ...]
+    }
+
+    Returns (batch mode):
     {
         "public_key": "string",
         "block_hash": "string",
         "block_height": int,
-        "nonces": [int, ...],  # filtered nonces
-        "dist": [float, ...],   # distances
-        "node_id": int
+        "nonces": [int, ...],
+        "dist": [float, ...],
+        "node_id": int,
+        "total_computed": int,
+        "total_valid": int
     }
+
+    Yields (streaming mode):
+    Multiple batches of results as they are computed
     """
     try:
         # Extract input data
@@ -100,13 +115,9 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         block_hash = input_data["block_hash"]
         block_height = input_data["block_height"]
         public_key = input_data["public_key"]
-        nonces = input_data["nonces"]
         r_target = input_data["r_target"]
-
         params_dict = input_data.get("params", {})
         devices = input_data.get("devices", ["cuda:0"])
-
-        logger.info(f"Received request: block_hash={block_hash}, public_key={public_key[:10]}..., nonces={len(nonces)}, r_target={r_target}")
 
         # Initialize compute (or reuse existing)
         compute = initialize_compute(
@@ -119,30 +130,97 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         # Get target for this block
         target = get_target(block_hash, compute.params.vocab_size)
 
-        # Compute distances
-        logger.info(f"Computing distances for {len(nonces)} nonces...")
-        proof_batch = compute(
-            nonces=nonces,
-            public_key=public_key,
-            target=target,
-        )
+        # Check if streaming mode or batch mode
+        if input_data.get("streaming", False):
+            # STREAMING MODE
+            batch_size = input_data.get("batch_size", 16)
+            max_batches = input_data.get("max_batches", None)  # None = unlimited
+            start_nonce = input_data.get("start_nonce", 0)
 
-        # Filter by r_target
-        filtered_batch = proof_batch.sub_batch(r_target)
+            logger.info(f"Streaming mode: block_hash={block_hash}, public_key={public_key[:10]}..., "
+                       f"batch_size={batch_size}, max_batches={max_batches}, r_target={r_target}")
 
-        logger.info(f"Computed {len(proof_batch)} nonces, {len(filtered_batch)} passed r_target filter")
+            current_nonce = start_nonce
+            batch_count = 0
+            total_computed = 0
+            total_valid = 0
 
-        # Return result
-        return {
-            "public_key": filtered_batch.public_key,
-            "block_hash": filtered_batch.block_hash,
-            "block_height": filtered_batch.block_height,
-            "nonces": filtered_batch.nonces,
-            "dist": filtered_batch.dist,
-            "node_id": filtered_batch.node_id,
-            "total_computed": len(proof_batch),
-            "total_valid": len(filtered_batch),
-        }
+            # Generator loop - yield results as batches are computed
+            while True:
+                # Check if we've reached max_batches
+                if max_batches is not None and batch_count >= max_batches:
+                    logger.info(f"Reached max_batches={max_batches}, stopping")
+                    break
+
+                # Generate batch of nonces
+                nonces = list(range(current_nonce, current_nonce + batch_size))
+
+                # Compute distances for this batch
+                proof_batch = compute(
+                    nonces=nonces,
+                    public_key=public_key,
+                    target=target,
+                )
+
+                # Filter by r_target
+                filtered_batch = proof_batch.sub_batch(r_target)
+
+                batch_count += 1
+                total_computed += len(proof_batch)
+                total_valid += len(filtered_batch)
+
+                logger.info(f"Batch {batch_count}: computed {len(proof_batch)} nonces, "
+                           f"{len(filtered_batch)} passed filter")
+
+                # Yield this batch result
+                yield {
+                    "public_key": filtered_batch.public_key,
+                    "block_hash": filtered_batch.block_hash,
+                    "block_height": filtered_batch.block_height,
+                    "nonces": filtered_batch.nonces,
+                    "dist": filtered_batch.dist,
+                    "node_id": filtered_batch.node_id,
+                    "batch_number": batch_count,
+                    "batch_computed": len(proof_batch),
+                    "batch_valid": len(filtered_batch),
+                    "total_computed": total_computed,
+                    "total_valid": total_valid,
+                    "next_nonce": current_nonce + batch_size,
+                }
+
+                # Move to next batch
+                current_nonce += batch_size
+
+        else:
+            # BATCH MODE (legacy)
+            nonces = input_data["nonces"]
+
+            logger.info(f"Batch mode: block_hash={block_hash}, public_key={public_key[:10]}..., "
+                       f"nonces={len(nonces)}, r_target={r_target}")
+
+            # Compute distances
+            proof_batch = compute(
+                nonces=nonces,
+                public_key=public_key,
+                target=target,
+            )
+
+            # Filter by r_target
+            filtered_batch = proof_batch.sub_batch(r_target)
+
+            logger.info(f"Computed {len(proof_batch)} nonces, {len(filtered_batch)} passed r_target filter")
+
+            # Return single result
+            return {
+                "public_key": filtered_batch.public_key,
+                "block_hash": filtered_batch.block_hash,
+                "block_height": filtered_batch.block_height,
+                "nonces": filtered_batch.nonces,
+                "dist": filtered_batch.dist,
+                "node_id": filtered_batch.node_id,
+                "total_computed": len(proof_batch),
+                "total_valid": len(filtered_batch),
+            }
 
     except Exception as e:
         logger.error(f"Error in handler: {str(e)}", exc_info=True)
