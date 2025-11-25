@@ -8,7 +8,8 @@ import threading
 import time
 import numpy as np
 from pow.models.utils import Params, PARAMS_V1, PARAMS_V2
-from pow.compute.gpu_group import GpuGroup
+# GpuGroup import removed - not used in this file
+# from pow.compute.gpu_group import GpuGroup
 
 BIAS = 6500
 COEFF = 30.5

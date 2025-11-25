@@ -33,7 +33,8 @@ from common.logger import create_logger
 
 logger = create_logger(__name__)
 
-from .tokenizer import Tokenizer
+# Tokenizer import removed - not used in serverless version (only used in Llama class)
+# from .tokenizer import Tokenizer
 
 # -----------------------------------------------------------------------------
 # ModelArgs
